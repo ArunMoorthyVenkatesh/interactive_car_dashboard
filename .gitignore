@@ -1,0 +1,32 @@
+# Secrets — never commit
+.env
+.env.*
+*.pem
+
+# Python
+env/
+env*/
+.venv*/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Large / regeneratable data
+car_manual.pdf
+car_manual_toyota.pdf
+car_manual_honda.pdf
+car_manual_isuzu.pdf
+*.pdf.embeddings.pkl
+*.pdf.pages.pkl
+
+# OS / editor
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.log
