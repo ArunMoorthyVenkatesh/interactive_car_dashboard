@@ -17,6 +17,7 @@ google-api-python-client==2.171.0
 google-auth==2.40.2
 google-auth-httplib2==0.2.0
 google-generativeai
+google-genai
 google-search-results
 googleapis-common-protos==1.70.0
 groq

@@ -25,10 +25,15 @@ except ImportError:
     print("Warning: numpy not available, VAD will use basic processing")
 
 import google.generativeai as genai
+from google import genai as google_genai_sdk
+from google.genai import types as google_genai_types
+import base64
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, HTTPException, Request, File, UploadFile, Form
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request, File, UploadFile, Form, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, Response
+import io
+import wave
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from pydantic import BaseModel
@@ -71,6 +76,16 @@ SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 API_KEY = "nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM"
+CAR_MODEL_NAME = "2024 Isuzu MU-X"
+
+# --- Gemini Live (real-time voice) — deliberately separate key from GEMINI_API_KEY above ---
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GEMINI_LIVE_MODEL = "gemini-2.5-flash-native-audio-latest"
+GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+GEMINI_TTS_VOICE = "Kore"
+gemini_live_client = google_genai_sdk.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
+if not GOOGLE_API_KEY:
+    print("Warning: GOOGLE_API_KEY not set — /ws/live (Gemini Live) will be unavailable.")
 
 GROQ_CLIENT = None
 TRANSCRIPTION_MODEL = "whisper-large-v3-turbo"
@@ -2661,9 +2676,12 @@ async def startup_event():
 # --- CORS Middleware Configuration (Keep as is) ---
 origins = [
     "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
-    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://127.0.0.1:5175",
     "http://47.130.32.171",
 ]
 app.add_middleware(
@@ -3005,6 +3023,23 @@ async def process_command_unified_endpoint(
         return JSONResponse(status_code=status_code, content=ai_response_dict)
 
     return JSONResponse(status_code=200, content=ai_response_dict)
+
+@app.get("/current-weather/", response_class=JSONResponse)
+async def current_weather_endpoint(lat: float, lng: float):
+    """Lightweight JSON weather lookup for the dashboard widget — separate from the
+    conversational Gemini pipeline, which returns natural-language text, not structured data."""
+    result = await asyncio.to_thread(perform_weather_search, lat, lng)
+    if "error" in result:
+        return JSONResponse(status_code=502, content=result)
+    return JSONResponse(status_code=200, content=result)
+
+@app.get("/air-quality/", response_class=JSONResponse)
+async def air_quality_endpoint(lat: float, lng: float):
+    """Lightweight JSON air-quality lookup for the dashboard widget."""
+    result = await asyncio.to_thread(perform_air_pollution_current, lat, lng)
+    if "error" in result:
+        return JSONResponse(status_code=502, content=result)
+    return JSONResponse(status_code=200, content=result)
 
 @app.get("/transcription/info/", response_class=JSONResponse)
 async def get_transcription_info():
@@ -3504,6 +3539,53 @@ async def read_root():
     }
 
 # --- API Key Verification Endpoint ---
+class SpeechRequest(BaseModel):
+    text: str
+    langChoice: Optional[str] = "en"
+
+
+@app.post("/generate-speech/")
+async def generate_speech_endpoint(payload: SpeechRequest):
+    """Real natural-sounding speech via Gemini TTS (GOOGLE_API_KEY), returned as a
+    playable WAV file. Replaces the browser's built-in speechSynthesis voice."""
+    if not gemini_live_client:
+        raise HTTPException(status_code=503, detail="GOOGLE_API_KEY not configured for speech generation.")
+    if not payload.text or not payload.text.strip():
+        raise HTTPException(status_code=400, detail="text is required.")
+
+    try:
+        response = gemini_live_client.models.generate_content(
+            model=GEMINI_TTS_MODEL,
+            contents=payload.text,
+            config=google_genai_types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=google_genai_types.SpeechConfig(
+                    voice_config=google_genai_types.VoiceConfig(
+                        prebuilt_voice_config=google_genai_types.PrebuiltVoiceConfig(
+                            voice_name=GEMINI_TTS_VOICE
+                        )
+                    )
+                ),
+            ),
+        )
+        part = response.candidates[0].content.parts[0]
+        pcm_bytes = part.inline_data.data
+
+        # Gemini TTS returns raw 24kHz 16-bit mono PCM — wrap it in a WAV header
+        # so the browser's <audio>/fetch pipeline can play it directly.
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(24000)
+            wf.writeframes(pcm_bytes)
+
+        return Response(content=wav_buffer.getvalue(), media_type="audio/wav")
+    except Exception as e:
+        logger.error(f"Speech generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Speech generation failed: {e}")
+
+
 @app.get("/auth/verify")
 async def verify_api_key_endpoint():
     """Endpoint to verify if API key is valid - will only be reached if API key is valid"""
@@ -3513,7 +3595,254 @@ async def verify_api_key_endpoint():
         "authenticated": True
     }
 
+# --- Gemini Live: real-time voice mode, controls the dummy AC/media dashboard ---
+
+LIVE_DASHBOARD_TOOLS = [
+    {
+        "function_declarations": [
+            {
+                "name": "set_ac_power",
+                "description": "Turn the car's air conditioning on or off.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {"on": {"type": "BOOLEAN"}},
+                    "required": ["on"],
+                },
+            },
+            {
+                "name": "set_temperature",
+                "description": "Set the cabin temperature in Celsius, between 16 and 30.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {"celsius": {"type": "INTEGER"}},
+                    "required": ["celsius"],
+                },
+            },
+            {
+                "name": "adjust_temperature",
+                "description": "Increase or decrease the cabin temperature by one degree.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {"direction": {"type": "STRING", "enum": ["up", "down"]}},
+                    "required": ["direction"],
+                },
+            },
+            {
+                "name": "set_fan_speed",
+                "description": "Set the AC fan speed, from 1 (lowest) to 7 (highest).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {"level": {"type": "INTEGER"}},
+                    "required": ["level"],
+                },
+            },
+            {
+                "name": "get_current_location",
+                "description": "Get the driver's real current location (city/area name). Use this whenever the driver asks where they are, their current location, or what city/area they're in.",
+                "parameters": {"type": "OBJECT", "properties": {}, "required": []},
+            },
+            {
+                "name": "get_current_weather",
+                "description": "Get the current weather at the driver's real current location. Use this whenever the driver asks about weather, temperature outside, rain, or general outdoor conditions.",
+                "parameters": {"type": "OBJECT", "properties": {}, "required": []},
+            },
+            {
+                "name": "search_owner_manual",
+                "description": f"Search the {CAR_MODEL_NAME} owner's manual for information about features, warning lights, maintenance, or how to use something in the car.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {"type": "STRING", "description": "What to look up, e.g. 'tire pressure' or 'check engine light'."},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "find_nearby_dealership",
+                "description": f"Find the {CAR_MODEL_NAME} dealerships nearest to the driver's current location.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "limit": {"type": "INTEGER", "description": "How many dealerships to return, default 3."},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "web_search",
+                "description": "Search the web for up-to-date information not related to the car itself, such as news, prices, or general facts.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {"query": {"type": "STRING"}},
+                    "required": ["query"],
+                },
+            },
+        ]
+    }
+]
+
+# Tool calls that change visible dashboard state — forwarded to the frontend so it
+# can update the AC widget. The info-lookup tools (weather/manual/dealership/search)
+# only need their FunctionResponse fed back into Gemini's own spoken reply.
+DASHBOARD_TOOL_NAMES = {"set_ac_power", "set_temperature", "adjust_temperature", "set_fan_speed"}
+
+LIVE_SYSTEM_INSTRUCTION = (
+    f"You are the built-in voice assistant of a {CAR_MODEL_NAME}. "
+    "Keep spoken responses short and natural, like a real in-car assistant. "
+    "When the driver asks to change the AC, temperature, or fan, "
+    "call the matching tool immediately rather than just describing what you would do. "
+    "You always have access to the driver's real current GPS location — never say you "
+    "don't know where they are or can't determine their location. "
+    "When the driver asks where they are, their current location, or what city/area "
+    "they're in, call get_current_location. "
+    "When the driver asks about the weather, call get_current_weather — it already knows "
+    "their real current location, so never ask them where they are. "
+    "When the driver asks how something in the car works, about a warning light, or about "
+    "maintenance, call search_owner_manual with a short search query. "
+    "When the driver asks for the nearest dealership or service center, call find_nearby_dealership. "
+    "For anything else you don't already know (news, prices, general facts), call web_search."
+)
+
+
+async def resolve_live_tool_call(name: str, args: dict, user_lat: float, user_lon: float) -> dict:
+    """Run the actual lookup behind an info-only Gemini Live tool call and return a
+    plain-dict FunctionResponse payload for Gemini to speak from."""
+    try:
+        if name == "get_current_location":
+            # Reuses the weather API's reverse-geocoded city/country rather than
+            # calling a separate geocoding API for the same lat/lon.
+            weather = await asyncio.to_thread(perform_weather_search, user_lat, user_lon)
+            location = weather.get("location", {})
+            return {
+                "city": location.get("name"),
+                "country": location.get("country"),
+                "lat": user_lat,
+                "lon": user_lon,
+            }
+
+        if name == "get_current_weather":
+            return await asyncio.to_thread(perform_weather_search, user_lat, user_lon)
+
+        if name == "search_owner_manual":
+            query = str(args.get("query") or "")
+            context = await asyncio.to_thread(get_car_manual_context, query)
+            return {"manual_excerpt": context}
+
+        if name == "find_nearby_dealership":
+            limit = int(args.get("limit") or 3)
+            dealers = await asyncio.to_thread(get_nearest_dealerships, user_lat, user_lon, limit)
+            return {
+                "dealerships": [
+                    {
+                        "name": d.get("Dealer Name Eng"),
+                        "distance_km": round(d.get("distance_km", 0), 1),
+                        "phone": d.get("Tel"),
+                    }
+                    for d in dealers
+                ]
+            }
+
+        if name == "web_search":
+            query = str(args.get("query") or "")
+            return await asyncio.to_thread(perform_general_search, query)
+
+    except Exception as e:
+        logger.error(f"Live tool call '{name}' failed: {e}")
+        return {"error": str(e)}
+
+    return {"result": "ok"}
+
+
+@app.websocket("/ws/live")
+async def live_voice_websocket(websocket: WebSocket):
+    """Real-time voice conversation via Gemini Live, streaming mic audio in and speech audio out.
+    Uses GOOGLE_API_KEY (not GEMINI_API_KEY) — a separate credential dedicated to the Live API."""
+    await websocket.accept()
+
+    if not gemini_live_client:
+        await websocket.send_json({"type": "error", "message": "GOOGLE_API_KEY is not configured on the server."})
+        await websocket.close()
+        return
+
+    # Real GPS coords sent by the frontend on connect (see startLiveTalk) — falls back
+    # to the module-level default only if the driver's browser never provided one.
+    try:
+        user_lat = float(websocket.query_params.get("lat"))
+        user_lon = float(websocket.query_params.get("lng"))
+    except (TypeError, ValueError):
+        user_lat, user_lon = USER_LAT, USER_LON
+
+    config = {
+        "response_modalities": ["AUDIO"],
+        "system_instruction": LIVE_SYSTEM_INSTRUCTION,
+        "tools": LIVE_DASHBOARD_TOOLS,
+    }
+
+    try:
+        async with gemini_live_client.aio.live.connect(model=GEMINI_LIVE_MODEL, config=config) as session:
+
+            async def relay_client_audio():
+                while True:
+                    msg = await websocket.receive_json()
+                    msg_type = msg.get("type")
+                    if msg_type == "audio":
+                        pcm_bytes = base64.b64decode(msg["data"])
+                        await session.send_realtime_input(
+                            audio=google_genai_types.Blob(data=pcm_bytes, mime_type="audio/pcm;rate=16000")
+                        )
+                    elif msg_type == "end":
+                        break
+
+            async def relay_gemini_audio():
+                async for response in session.receive():
+                    if response.data:
+                        await websocket.send_json({
+                            "type": "audio",
+                            "data": base64.b64encode(response.data).decode("ascii"),
+                        })
+                    if response.tool_call:
+                        function_responses = []
+                        for fc in response.tool_call.function_calls:
+                            args = dict(fc.args or {})
+                            if fc.name in DASHBOARD_TOOL_NAMES:
+                                result = {"result": "ok"}
+                                await websocket.send_json({
+                                    "type": "tool_call",
+                                    "name": fc.name,
+                                    "args": args,
+                                })
+                            else:
+                                result = await resolve_live_tool_call(fc.name, args, user_lat, user_lon)
+                            function_responses.append(
+                                google_genai_types.FunctionResponse(
+                                    id=fc.id, name=fc.name, response=result
+                                )
+                            )
+                        await session.send_tool_response(function_responses=function_responses)
+
+            recv_task = asyncio.create_task(relay_client_audio())
+            send_task = asyncio.create_task(relay_gemini_audio())
+            done, pending = await asyncio.wait(
+                {recv_task, send_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+            for t in done:
+                exc = t.exception()
+                if exc and not isinstance(exc, WebSocketDisconnect):
+                    logger.error(f"Live voice task error: {exc}")
+
+    except WebSocketDisconnect:
+        logger.info("Live voice client disconnected")
+    except Exception as e:
+        logger.error(f"Live voice session error: {e}")
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
 # --- Main Entry Point for Uvicorn (Keep as is) ---
 if __name__ == "__main__":
     logger.info("Starting Car Command AI API with Uvicorn...")
-    uvicorn.run(app, host="0.0.0.0", port=8002, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8003, log_level="info")

@@ -1,817 +1,673 @@
 import React, { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
 import './App.css';
 
 // --- Configuration ---
 // const API_BASE_URL = '/api'; // Your FastAPI backend URL
 const API_BASE_URL = 'http://localhost:8001';
 
-function App() {
-  const [commandText, setCommandText] = useState('');
-  const [apiResponse, setApiResponse] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
+// --- Icons (inline SVG, no external dependency) ---
+const MicIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+    <line x1="12" y1="19" x2="12" y2="23" />
+    <line x1="8" y1="23" x2="16" y2="23" />
+  </svg>
+);
 
-  // For Audio Recording with MediaRecorder API
-  const [isRecording, setIsRecording] = useState(false);
-  const [isAudioSupported, setIsAudioSupported] = useState(false);
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const [recordingTime, setRecordingTime] = useState(0);
-  const recordingTimerRef = useRef(null);
+const MicOffIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="1" y1="1" x2="23" y2="23" />
+    <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" />
+    <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23" />
+    <line x1="12" y1="19" x2="12" y2="23" />
+    <line x1="8" y1="23" x2="16" y2="23" />
+  </svg>
+);
 
-  // --- NEW: State for Hugging Face Interaction ---
-  const [hfPrompt, setHfPrompt] = useState('');
-  const [hfResponse, setHfResponse] = useState('');
-  const [isHfLoading, setIsHfLoading] = useState(false);
-  const [hfError, setHfError] = useState('');
+const CarIcon = () => (
+  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 13l1.5-4.5A2 2 0 0 1 6.4 7h11.2a2 2 0 0 1 1.9 1.5L21 13" />
+    <path d="M3 13h18v4a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1v-1H6v1a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-4z" />
+    <circle cx="7.5" cy="16.5" r="1.5" />
+    <circle cx="16.5" cy="16.5" r="1.5" />
+  </svg>
+);
 
-  const [sessionId, setSessionId] = useState(null);
-  const [chatHistory, setChatHistory] = useState([]);
-  const [isConversationActive, setIsConversationActive] = useState(false);
-  const timeoutRef = useRef(null);
-  const [conversationTimeout, setConversationTimeout] = useState(50);
-  const [langChoice, setLangChoice] = useState("en");
-  
-  useEffect(() => {
-    if (!sessionId) {
-      const newSessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substring(2, 11);
-      setSessionId(newSessionId);
-      console.log('Generated new session ID:', newSessionId);
-    }
-  }, [sessionId]);
+const SparkleIcon = () => (
+  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" />
+  </svg>
+);
 
-  const resetChat = async () => {
-    console.log('Resetting conversation due to inactivity or manual reset');
-    
-    // Reset conversation on backend if session exists
-    if (sessionId) {
-      try {
-        await axios.post(`${API_BASE_URL}/reset-conversation/${sessionId}`, {}, {
-          headers: {
-            'X-API-Key': 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM',
-            'Content-Type': 'application/json'
-          }
-        });
-        console.log('Backend conversation reset successfully');
-      } catch (error) {
-        console.error('Error resetting backend conversation:', error);
-      }
-    }
-    
-    // Reset frontend state
-    setChatHistory([]);
-    setIsConversationActive(false);
-    setCommandText('');
-    setApiResponse(null);
-    setError('');
-    
-    // Generate new session ID
-    const newSessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substring(2, 11);
-    setSessionId(newSessionId);
-    console.log('Generated new session ID after reset:', newSessionId);
-    
-    // Clear any existing timeout
-    clearTimeout(timeoutRef.current);
-  };
+const SignalIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+    <rect x="2" y="14" width="4" height="8" rx="1" />
+    <rect x="10" y="9" width="4" height="13" rx="1" />
+    <rect x="18" y="4" width="4" height="18" rx="1" opacity="0.5" />
+  </svg>
+);
 
-  const resetTimeout = () => {
-    clearTimeout(timeoutRef.current);
-    timeoutRef.current = setTimeout(() => {
-      alert(`Resetting conversation due to ${conversationTimeout} seconds of inactivity.`);
-      resetChat();
-    }, conversationTimeout * 1000);
-  };
+const FanIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 12c0-3 1-6 4-7 2.5-.8 4.5 1 3.5 3.5-1 2.5-4.5 3.5-7.5 3.5z" />
+    <path d="M12 12c-3 0-6-1-7-4-.8-2.5 1-4.5 3.5-3.5 2.5 1 3.5 4.5 3.5 7.5z" />
+    <path d="M12 12c0 3-1 6-4 7-2.5.8-4.5-1-3.5-3.5 1-2.5 4.5-3.5 7.5-3.5z" />
+    <circle cx="12" cy="12" r="1.6" />
+  </svg>
+);
 
-  // Reset timeout when chat history changes or conversation becomes active
-  useEffect(() => {
-    if (isConversationActive && chatHistory.length > 0) {
-      resetTimeout();
-    }
-    return () => clearTimeout(timeoutRef.current);
-  }, [chatHistory, isConversationActive, conversationTimeout]);
+const PowerIcon = () => (
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 2v8" />
+    <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+  </svg>
+);
 
-  // Load conversation history when session ID changes
-  useEffect(() => {
-    if (sessionId && isConversationActive) {
-      loadConversationHistory();
-    }
-  }, [sessionId]);
+const LeafIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M11 20A7 7 0 0 1 4 13c0-6 5-11 16-11 0 11-5 18-9 18z" />
+    <path d="M4 13c4 0 7-3 7-7" />
+  </svg>
+);
 
-  const loadConversationHistory = async () => {
-    if (!sessionId) return;
-    
-    try {
-      const response = await axios.get(`${API_BASE_URL}/conversation-history/${sessionId}`, {
-        headers: {
-          'X-API-Key': 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM',
-          'Content-Type': 'application/json'
-        }
-      });
-      const history = response.data.chat_history;
-      
-      // Convert backend format to frontend format
-      const frontendHistory = history.map(msg => ({
-        sender: msg.role === 'user' ? 'user' : 'assistant',
-        message: msg.content,
-      }));
-      
-      setChatHistory(frontendHistory);
-      console.log('Loaded conversation history:', frontendHistory);
-    } catch (error) {
-      if (error.response?.status === 404) {
-        console.log('No existing conversation found for session:', sessionId);
-        setChatHistory([]);
-      } else {
-        console.error('Error loading conversation history:', error);
-      }
-    }
-  };
+// OpenWeather's 1-5 Air Quality Index scale.
+const AQI_LABELS = { 1: 'Good', 2: 'Fair', 3: 'Moderate', 4: 'Poor', 5: 'Very Poor' };
 
-  useEffect(() => {
-    // Simple browser-based audio support detection
-    const checkAudioSupport = () => {
-      console.log('🎙️ Checking browser audio support...');
-      console.log('Browser:', navigator.userAgent);
-      console.log('Protocol:', window.location.protocol);
+const SunIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="4.5" />
+    <path d="M12 2.5v2.5M12 19v2.5M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M2.5 12H5M19 12h2.5M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8" />
+  </svg>
+);
 
-      // Basic API checks
-      const hasMediaDevices = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-      const hasMediaRecorder = !!window.MediaRecorder;
+const CloudIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6.5 19a4.5 4.5 0 0 1-.5-8.97A5.5 5.5 0 0 1 16.9 8.06 4 4 0 0 1 17 16H6.5z" />
+  </svg>
+);
 
-      if (!hasMediaDevices) {
-        console.warn('❌ getUserMedia not supported');
-        setIsAudioSupported(false);
-        return;
-      }
+const CloudRainIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6.5 15.5a4.5 4.5 0 0 1-.5-8.97A5.5 5.5 0 0 1 16.9 4.56 4 4 0 0 1 17 12.5H6.5z" />
+    <path d="M8 18v2M12 18v2M16 18v2" />
+  </svg>
+);
 
-      if (!hasMediaRecorder) {
-        console.warn('❌ MediaRecorder not supported');
-        setIsAudioSupported(false);
-        return;
-      }
+const CloudLightningIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6.5 14.5a4.5 4.5 0 0 1-.5-8.97A5.5 5.5 0 0 1 16.9 3.56 4 4 0 0 1 17 11.5H6.5z" />
+    <path d="M13 13l-3 5h3l-3 5" />
+  </svg>
+);
 
-      // Check for at least one supported audio format
-      const commonFormats = ['audio/webm', 'audio/mp4', 'audio/ogg', 'audio/wav'];
-      const supportedFormat = commonFormats.find(format => MediaRecorder.isTypeSupported(format));
+const SnowflakeIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 2v20M4.2 7l15.6 10M4.2 17L19.8 7" />
+  </svg>
+);
 
-      if (!supportedFormat) {
-        console.warn('❌ No supported audio formats');
-        setIsAudioSupported(false);
-        return;
-      }
+const MistIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 8h16M4 12h16M4 16h10" />
+  </svg>
+);
 
-      console.log('✅ Browser supports audio recording');
-      console.log('📱 Supported format:', supportedFormat);
-      setIsAudioSupported(true);
-    };
-
-    checkAudioSupport();
-  }, []);
-
-  // Cleanup function to stop recording when component unmounts
-  useEffect(() => {
-    return () => {
-      if (isRecording && mediaRecorderRef.current) {
-        mediaRecorderRef.current.stop();
-      }
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-      }
-    };
-  }, [isRecording]);
-
-  const handleInputChange = (event) => {
-    setCommandText(event.target.value);
-  };
-
-  const handleHfInputChange = (event) => {
-    setHfPrompt(event.target.value);
-  };
-
-  const speakText = (textToSpeak) => {
-  if (!textToSpeak) return;
-  
-  return new Promise((resolve) => {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(textToSpeak);
-
-      // Set language based on current language choice
-      utterance.lang = langChoice === 'th' ? 'th-TH' : 'en-US';
-
-      // Get available voices and filter by language
-      const voices = window.speechSynthesis.getVoices();
-      
-      let selectedVoice = null;
-      if (langChoice === 'th') {
-        // Try to find a Thai voice
-        selectedVoice = voices.find(v => 
-          v.lang.toLowerCase().includes('th') || 
-          v.name.toLowerCase().includes('thai')
-        );
-        console.log('Looking for Thai voice, found:', selectedVoice?.name || 'none');
-      } else {
-        // Try to find an English voice
-        selectedVoice = voices.find(v => 
-          v.lang.toLowerCase().startsWith('en') || 
-          v.name.toLowerCase().includes('english')
-        );
-        console.log('Looking for English voice, found:', selectedVoice?.name || 'none');
-      }
-
-      if (selectedVoice) {
-        utterance.voice = selectedVoice;
-        console.log(`Using voice: ${selectedVoice.name} (${selectedVoice.lang})`);
-      } else {
-        console.warn(`No ${langChoice === 'th' ? 'Thai' : 'English'} voice found, using default`);
-      }
-
-      utterance.rate = 0.9; 
-      utterance.pitch = 1.0;
-
-      utterance.onend = () => {
-        console.log('Speech synthesis completed');
-        resolve();
-      };
-
-      utterance.onerror = (event) => {
-        console.error('Speech synthesis error:', event);
-        resolve(); // Still resolve to continue the flow
-      };
-
-      window.speechSynthesis.speak(utterance);
-    } else {
-      console.warn('Speech Synthesis API not supported in this browser.');
-      setError('Text-to-speech is not supported in your browser.');
-      resolve();
-    }
-  });
+// Maps an OpenWeather icon code (e.g. "10d") to one of the SVG icons above by its
+// two-digit condition prefix, ignoring the day/night suffix.
+const weatherIconFor = (code) => {
+  const prefix = (code || '').slice(0, 2);
+  if (prefix === '01') return <SunIcon />;
+  if (['02', '03', '04'].includes(prefix)) return <CloudIcon />;
+  if (['09', '10'].includes(prefix)) return <CloudRainIcon />;
+  if (prefix === '11') return <CloudLightningIcon />;
+  if (prefix === '13') return <SnowflakeIcon />;
+  if (prefix === '50') return <MistIcon />;
+  return <CloudIcon />;
 };
 
-  const handleSubmit = async (event, textToSubmit) => {
-    if (event) event.preventDefault();
-    
-    const finalCommandText = textToSubmit !== undefined ? textToSubmit : commandText;
-    if (!finalCommandText.trim()) {
-      setError('Please enter or speak a command.');
-      return;
-    }
+function App() {
+  const [error, setError] = useState('');
 
-    setIsLoading(true);
+  // Whether this browser can access the microphone at all — gates the Live Talk
+  // button (the only voice input mode now; Push to talk was removed).
+  const [isAudioSupported, setIsAudioSupported] = useState(false);
+
+  // --- Ignition: system must be "started" before the dashboard is usable ---
+  const [isSystemOn, setIsSystemOn] = useState(false);
+  const [isBooting, setIsBooting] = useState(false);
+
+  // Real GPS location, acquired on power-on — see toggleSystemPower. Used for
+  // location-dependent queries (weather, nearby search, dealership finder) instead
+  // of letting the backend fall back to a random default point.
+  const [coords, setCoords] = useState(null);
+
+  // Dashboard widget data — fetched once real coords are available (see the effect
+  // below). These are separate lightweight JSON endpoints, not the conversational
+  // Gemini pipeline, so the widgets can populate on their own without a voice command.
+  const [weather, setWeather] = useState(null);
+  const [airQuality, setAirQuality] = useState(null);
+
+  useEffect(() => {
+    if (!coords) return;
+
+    fetch(`${API_BASE_URL}/current-weather/?lat=${coords.lat}&lng=${coords.lng}`, {
+      headers: { 'X-API-Key': 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM' },
+    })
+      .then(res => res.ok ? res.json() : Promise.reject(new Error(`Weather request failed: ${res.status}`)))
+      .then(setWeather)
+      .catch(err => console.warn('Weather widget fetch failed:', err));
+
+    fetch(`${API_BASE_URL}/air-quality/?lat=${coords.lat}&lng=${coords.lng}`, {
+      headers: { 'X-API-Key': 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM' },
+    })
+      .then(res => res.ok ? res.json() : Promise.reject(new Error(`Air quality request failed: ${res.status}`)))
+      .then(setAirQuality)
+      .catch(err => console.warn('Air quality widget fetch failed:', err));
+  }, [coords]);
+
+  // --- Gemini Live (real-time voice mode) ---
+  const [isLiveActive, setIsLiveActive] = useState(false);
+  const [liveStatus, setLiveStatus] = useState('idle'); // idle | connecting | listening | speaking
+  const liveWsRef = useRef(null);
+  const liveStreamRef = useRef(null);
+  const liveCaptureCtxRef = useRef(null);
+  const liveCaptureNodeRef = useRef(null);
+  const livePlaybackCtxRef = useRef(null);
+  const livePlaybackCursorRef = useRef(0);
+
+  // --- Dummy dashboard state: AC/climate, driven by real command codes ---
+  const [ac, setAc] = useState({ power: true, temp: 22, fan: 3 });
+  const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+
+  const WAKE_PHRASE = 'hello honda';
+
+  // Live clock for the dashboard status bar
+  const [clock, setClock] = useState(() => new Date());
+  useEffect(() => {
+    const tick = setInterval(() => setClock(new Date()), 1000 * 15);
+    return () => clearInterval(tick);
+  }, []);
+
+  useEffect(() => {
+    // Live Talk needs getUserMedia (mic access) — that's the only real requirement
+    // now that Push to talk's MediaRecorder-based pipeline is gone.
+    const hasMediaDevices = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    setIsAudioSupported(hasMediaDevices);
+    if (!hasMediaDevices) console.warn('❌ getUserMedia not supported in this browser');
+  }, []);
+
+  // --- Gemini Live tool-call -> same dashboard state ---
+  // Only the AC/climate tools update visible dashboard state — Gemini Live already
+  // speaks its own natural confirmation for whatever it just did, so no separate
+  // audio clip or chat message is needed here.
+  const applyLiveToolCall = (name, args) => {
+    if (name === 'set_ac_power') { setAc(s => ({ ...s, power: !!args.on })); }
+    else if (name === 'set_temperature') {
+      const v = parseInt(args.celsius, 10);
+      if (!isNaN(v)) setAc(s => ({ ...s, temp: clamp(v, 16, 30) }));
+    }
+    else if (name === 'adjust_temperature') {
+      setAc(s => ({ ...s, temp: clamp(s.temp + (args.direction === 'down' ? -1 : 1), 16, 30) }));
+    }
+    else if (name === 'set_fan_speed') {
+      const v = parseInt(args.level, 10);
+      if (!isNaN(v)) setAc(s => ({ ...s, fan: clamp(v, 1, 7) }));
+    }
+  };
+
+  // --- Raw PCM audio helpers for Gemini Live streaming ---
+  const floatTo16BitPCM = (float32Array) => {
+    const out = new Int16Array(float32Array.length);
+    for (let i = 0; i < float32Array.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32Array[i]));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return out;
+  };
+
+  const downsampleBuffer = (buffer, inputSampleRate, targetSampleRate) => {
+    if (targetSampleRate === inputSampleRate) return buffer;
+    const ratio = inputSampleRate / targetSampleRate;
+    const newLength = Math.round(buffer.length / ratio);
+    const result = new Float32Array(newLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < newLength) {
+      const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+      let accum = 0, count = 0;
+      for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+        accum += buffer[i];
+        count++;
+      }
+      result[offsetResult] = count > 0 ? accum / count : 0;
+      offsetResult++;
+      offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
+  };
+
+  const base64FromInt16 = (int16Array) => {
+    const bytes = new Uint8Array(int16Array.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  };
+
+  const int16FromBase64 = (b64) => {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Int16Array(bytes.buffer);
+  };
+
+  const playLiveAudioChunk = (base64Data) => {
+    const ctx = livePlaybackCtxRef.current;
+    if (!ctx) return;
+    const int16 = int16FromBase64(base64Data);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+    const buffer = ctx.createBuffer(1, float32.length, 24000);
+    buffer.copyToChannel(float32, 0);
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    const startAt = Math.max(now, livePlaybackCursorRef.current);
+    src.start(startAt);
+    livePlaybackCursorRef.current = startAt + buffer.duration;
+  };
+
+  const stopLiveTalk = () => {
+    setIsLiveActive(false);
+    setLiveStatus('idle');
+    if (liveWsRef.current) {
+      try { liveWsRef.current.send(JSON.stringify({ type: 'end' })); } catch (e) { /* noop */ }
+      liveWsRef.current.close();
+      liveWsRef.current = null;
+    }
+    if (liveCaptureNodeRef.current) {
+      liveCaptureNodeRef.current.disconnect();
+      liveCaptureNodeRef.current = null;
+    }
+    if (liveCaptureCtxRef.current) {
+      liveCaptureCtxRef.current.close();
+      liveCaptureCtxRef.current = null;
+    }
+    if (liveStreamRef.current) {
+      liveStreamRef.current.getTracks().forEach(t => t.stop());
+      liveStreamRef.current = null;
+    }
+    if (livePlaybackCtxRef.current) {
+      livePlaybackCtxRef.current.close();
+      livePlaybackCtxRef.current = null;
+    }
+  };
+
+  const startLiveTalk = async () => {
+    if (isLiveActive) return;
+    setLiveStatus('connecting');
     setError('');
-    setApiResponse(null);
-    setIsConversationActive(true);
-    resetTimeout();
 
-    // Append user message to chat immediately for better UX
-    const userMessage = { 
-      sender: 'user', 
-      message: finalCommandText, 
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      liveStreamRef.current = stream;
+
+      // Real GPS coords (if acquired on power-on) let the backend answer
+      // weather/dealership/local-search questions for the driver's actual location
+      // instead of the random default fallback.
+      let wsUrl = API_BASE_URL.replace(/^http/, 'ws') + '/ws/live';
+      if (coords) {
+        wsUrl += `?lat=${coords.lat}&lng=${coords.lng}`;
+      }
+      const ws = new WebSocket(wsUrl);
+      liveWsRef.current = ws;
+
+      livePlaybackCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      livePlaybackCursorRef.current = livePlaybackCtxRef.current.currentTime;
+
+      ws.onopen = () => {
+        setLiveStatus('listening');
+        setIsLiveActive(true);
+
+        const captureCtx = new (window.AudioContext || window.webkitAudioContext)();
+        liveCaptureCtxRef.current = captureCtx;
+        const source = captureCtx.createMediaStreamSource(stream);
+        const processor = captureCtx.createScriptProcessor(4096, 1, 1);
+        const muteGain = captureCtx.createGain();
+        muteGain.gain.value = 0; // process audio without echoing mic input back to speakers
+        liveCaptureNodeRef.current = processor;
+
+        processor.onaudioprocess = (e) => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const input = e.inputBuffer.getChannelData(0);
+          const downsampled = downsampleBuffer(input, captureCtx.sampleRate, 16000);
+          const pcm16 = floatTo16BitPCM(downsampled);
+          ws.send(JSON.stringify({ type: 'audio', data: base64FromInt16(pcm16) }));
+        };
+
+        source.connect(processor);
+        processor.connect(muteGain);
+        muteGain.connect(captureCtx.destination);
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'audio') {
+          setLiveStatus('speaking');
+          playLiveAudioChunk(msg.data);
+        } else if (msg.type === 'tool_call') {
+          applyLiveToolCall(msg.name, msg.args || {});
+        } else if (msg.type === 'error') {
+          setError(msg.message || 'Live voice error.');
+          stopLiveTalk();
+        }
+      };
+
+      ws.onclose = () => stopLiveTalk();
+      ws.onerror = () => {
+        setError('Live voice connection error.');
+        stopLiveTalk();
+      };
+    } catch (err) {
+      console.error('Failed to start live talk:', err);
+      setError('Could not start live voice mode: ' + err.message);
+      setLiveStatus('idle');
+    }
+  };
+
+  const toggleLiveTalk = () => {
+    if (isLiveActive) stopLiveTalk();
+    else startLiveTalk();
+  };
+
+  // --- Wake word: "Hello Toyota" starts a voice command ---
+  // On by default (even on a first-ever visit) and persists across reloads/power-cycles
+  // via localStorage, so it stays on "all the time" unless the driver explicitly turns
+  // it off — turning it off is itself remembered too. wakeWordEnabled reflects whether
+  // it's actually listening right now (only possible while powered on).
+  const [wakeWordPreferred, setWakeWordPreferred] = useState(() => {
+    try { return localStorage.getItem(`wakeWordPreferred:${WAKE_PHRASE}`) !== 'false'; }
+    catch (e) { return true; }
+  });
+  const [wakeWordEnabled, setWakeWordEnabled] = useState(false);
+  const wakeRecognitionRef = useRef(null);
+
+  // Just for recognizing the wake phrase itself — follows the browser/OS locale
+  // rather than assuming English. The actual conversation that follows goes through
+  // Live Talk (Gemini Live), which is natively multilingual and needs no language hint.
+  const wakeWordLang = navigator.language || 'en-US';
+
+  const startWakeWordListening = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setError('Wake word detection is not supported in this browser.');
+      return;
+    }
+    if (wakeRecognitionRef.current) return; // already running
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = wakeWordLang;
+
+    recognition.onresult = (event) => {
+      const last = event.results[event.results.length - 1];
+      const heard = last[0].transcript.toLowerCase();
+      if (heard.includes(WAKE_PHRASE.toLowerCase())) {
+        recognition.stop();
+        startLiveTalk();
+      }
     };
-    setChatHistory(prev => [...prev, userMessage]);
 
-    try {
-      const formData = new FormData();
-      formData.append('command_text', finalCommandText);
-      formData.append('session_id', sessionId);
-      formData.append('langChoice', langChoice);
-
-      console.log('Sending request with session ID:', sessionId);
-
-      const response = await axios.post(`${API_BASE_URL}/process-command-unified/`, formData, {
-        headers: {
-          'X-API-Key': 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM',
-          'Content-Type': 'multipart/form-data'
-        }
-      });
-      setApiResponse(response.data);
-
-      // Update session ID if backend provides a new one
-      if (response.data?.session_id && response.data.session_id !== sessionId) {
-        setSessionId(response.data.session_id);
-        console.log('Updated session ID from backend:', response.data.session_id);
+    recognition.onend = () => {
+      // Browsers auto-stop after a period of silence — keep listening while enabled
+      if (wakeRecognitionRef.current === recognition) {
+        try { recognition.start(); } catch (e) { /* already started */ }
       }
+    };
 
-      if (response.data?.reply) {
-        const { command, reply, openEndedValue } = response.data;
+    recognition.onerror = (event) => {
+      console.warn('Wake word recognition error:', event.error);
+    };
 
-        const assistantMessage = { 
-          sender: 'assistant',
-          message: {
-            command,
-            reply,
-            openEndedValue,
-          },
-        };
-
-        setChatHistory(prev => [...prev, assistantMessage]);
-
-        await speakText(reply);
-      }
-    } catch (err) {
-      console.error('API Error (Gemini):', err);
-      const errorMessage = err.response?.data?.reply || err.message;
-      setError(`API Error: ${errorMessage}`);
-      if (err.response?.data) {
-        setApiResponse(err.response.data);
-      }
-      
-      // Add error message to chat history
-      const errorChatMessage = { 
-        sender: 'assistant', 
-        message: `Error: ${errorMessage}`,
-      };
-      setChatHistory(prev => [...prev, errorChatMessage]);
-    } finally {
-      setIsLoading(false);
-      if (textToSubmit === undefined) setCommandText('');
-    }
+    wakeRecognitionRef.current = recognition;
+    setWakeWordEnabled(true);
+    recognition.start();
   };
 
-  // Handler for Hugging Face prompt submission
-  const handleHfSubmit = async (event) => {
-    if (event) event.preventDefault();
-    if (!hfPrompt.trim()) {
-      setHfError('Please enter a prompt for the Hugging Face model.');
-      return;
+  const stopWakeWordListening = () => {
+    if (wakeRecognitionRef.current) {
+      wakeRecognitionRef.current.onend = null; // don't auto-restart
+      wakeRecognitionRef.current.stop();
+      wakeRecognitionRef.current = null;
     }
-    setIsHfLoading(true);
-    setHfError('');
-    setHfResponse('');
-
-    try {
-      const response = await axios.post(`${API_BASE_URL}/generate-hf-text/`, {
-        prompt_text: hfPrompt,
-        max_length: 150, // You can make this configurable
-      }, {
-        headers: {
-          'X-API-Key': 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM',
-          'Content-Type': 'application/json'
-        }
-      });
-      setHfResponse(response.data.generated_text);
-      // Optionally speak the HF response too
-      // speakText(response.data.generated_text);
-    } catch (err) {
-      console.error('API Error (Hugging Face):', err);
-      const errorMessage = err.response?.data?.error || err.response?.data?.detail || err.message || 'An unknown error occurred.';
-      setHfError(`HF API Error: ${errorMessage}`);
-    } finally {
-      setIsHfLoading(false);
-      // setHfPrompt(''); // Optionally clear prompt after submission
-    }
+    setWakeWordEnabled(false);
   };
 
+  // User-facing toggle: flips the persistent preference and, if the system is
+  // currently on, starts/stops listening immediately to match.
+  const toggleWakeWord = () => {
+    const next = !wakeWordPreferred;
+    setWakeWordPreferred(next);
+    try { localStorage.setItem(`wakeWordPreferred:${WAKE_PHRASE}`, String(next)); } catch (e) { /* noop */ }
 
+    if (next && isSystemOn) startWakeWordListening();
+    else if (!next) stopWakeWordListening();
+  };
 
-  const startRecording = async () => {
-    if (!isAudioSupported) {
-      setError('Audio recording is not supported in this browser.');
+  // Auto-resume wake word listening whenever the system powers on, if the driver
+  // previously left it enabled — that's what makes it "on all the time" without
+  // having to re-toggle it every ignition cycle.
+  useEffect(() => {
+    if (isSystemOn && wakeWordPreferred) {
+      startWakeWordListening();
+    } else if (!isSystemOn) {
+      stopWakeWordListening();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSystemOn]);
+
+  // --- Ignition button: only gates access to the system. It does NOT decide
+  // wake word on its own — that's driven by the persisted wakeWordPreferred
+  // effect above, which auto-resumes/stops listening as isSystemOn changes.
+  const toggleSystemPower = () => {
+    if (isSystemOn) {
+      // Powering off: cleanly stop anything that might be running
+      if (isLiveActive) stopLiveTalk();
+      setIsSystemOn(false);
+      setIsBooting(false);
       return;
     }
 
-    try {
-      console.log('🎙️ Requesting microphone access...');
-
-      // Start with basic audio constraints that work across all browsers/devices
-      let stream;
-      try {
-        // Try with enhanced constraints first
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          }
-        });
-        console.log('✅ Got microphone access with enhanced settings');
-      } catch (enhancedError) {
-        console.log('⚠️ Enhanced settings failed, trying basic audio...');
-        // Fallback to basic audio if enhanced fails
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        console.log('✅ Got microphone access with basic settings');
-      }
-
-      // Find the best supported audio format for this browser
-      const audioFormats = [
-        'audio/webm;codecs=opus',
-        'audio/webm',
-        'audio/mp4',
-        'audio/ogg;codecs=opus',
-        'audio/wav'
-      ];
-
-      let selectedFormat = 'audio/webm'; // Safe default
-      for (const format of audioFormats) {
-        if (MediaRecorder.isTypeSupported(format)) {
-          selectedFormat = format;
-          console.log('📱 Using audio format:', format);
-          break;
-        }
-      }
-
-      // Set up MediaRecorder
-      audioChunksRef.current = [];
-      mediaRecorderRef.current = new MediaRecorder(stream, {
-        mimeType: selectedFormat
-      });
-
-      // Real-time VAD analysis variables
-      let chunkIndex = 0;
-      let silenceDetectionActive = true;
-      let consecutiveSilenceChunks = 0;
-      const SILENCE_CHUNKS_THRESHOLD = 2; // 2 seconds of silence to trigger auto-stop
-
-      mediaRecorderRef.current.ondataavailable = async (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-
-          // Perform real-time VAD analysis
-          if (silenceDetectionActive) { // Analyze all chunks including first one
-            try {
-              const formData = new FormData();
-              formData.append('session_id', sessionId);
-              formData.append('audio_chunk', event.data);
-              formData.append('chunk_index', chunkIndex.toString());
-              formData.append('silence_threshold', '1000'); // Higher threshold for real-time
-
-              const response = await axios.post(`${API_BASE_URL}/voice/stream-audio-chunk`, formData, {
-                headers: {
-                  'X-API-Key': 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM',
-                  'Content-Type': 'multipart/form-data'
-                },
-                timeout: 2000 // Quick timeout for real-time processing
-              });
-
-              const { auto_stop_suggested, volume, is_silence } = response.data;
-              console.log(`🎙️ Chunk ${chunkIndex}: Volume=${volume}, Silence=${is_silence}, Auto-stop=${auto_stop_suggested}`);
-
-              // Track consecutive silence chunks
-              if (is_silence || volume < 1000) {
-                consecutiveSilenceChunks++;
-                console.log(`🔇 Silence detected: ${consecutiveSilenceChunks}/${SILENCE_CHUNKS_THRESHOLD} chunks`);
-              } else {
-                consecutiveSilenceChunks = 0; // Reset on speech
-                console.log(`🗣️ Speech detected, resetting silence counter`);
-              }
-
-              // Auto-stop after consecutive silence
-              if (consecutiveSilenceChunks >= SILENCE_CHUNKS_THRESHOLD && chunkIndex >= 3) {
-                console.log('🛑 Auto-stop triggered: Extended silence detected');
-                silenceDetectionActive = false;
-                stopRecording('auto-stop');
-                return;
-              }
-
-            } catch (error) {
-              console.error('VAD chunk analysis error:', error);
-              // Continue recording on VAD errors
-            }
-          }
-
-          chunkIndex++;
-        }
-      };
-
-      mediaRecorderRef.current.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, {
-          type: mediaRecorderRef.current.mimeType
-        });
-
-        console.log('🎵 Audio recorded:', audioBlob.size, 'bytes');
-
-        // Release microphone
-        stream.getTracks().forEach(track => track.stop());
-
-        // Send to backend
-        await sendAudioToBackend(audioBlob);
-      };
-
-      mediaRecorderRef.current.onerror = (event) => {
-        console.error('Recording error:', event.error);
-        setError(`Recording failed: ${event.error.message}`);
-      };
-
-      // Start recording with 1-second chunks for real-time VAD analysis
-      mediaRecorderRef.current.start(1000); // 1000ms chunks
-      setIsRecording(true);
-      setRecordingTime(0);
-      setError('');
-      setCommandText('');
-      console.log('🎙️ Recording started with real-time VAD analysis');
-      setApiResponse(null);
-
-      // Start timer
-      recordingTimerRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
-      }, 1000);
-
-      console.log('🔴 Recording started successfully');
-
-    } catch (error) {
-      console.error('❌ Microphone access failed:', error);
-
-      let errorMessage = 'Could not access microphone. ';
-      if (error.name === 'NotAllowedError') {
-        errorMessage += 'Please allow microphone permissions and try again.';
-      } else if (error.name === 'NotFoundError') {
-        errorMessage += 'No microphone detected. Please connect a microphone.';
-      } else {
-        errorMessage += 'Please check your microphone and browser settings.';
-      }
-
-      setError(errorMessage);
-    }
-  };
-
-  const stopRecording = (reason = 'manual') => {
-    if (mediaRecorderRef.current && (isRecording || mediaRecorderRef.current.state === 'recording')) {
-      console.log(`⏹️ Stopping recording (${reason})`);
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-
-      // Clear recording timer
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-        recordingTimerRef.current = null;
-      }
-
-      // Update UI based on stop reason
-      if (reason === 'auto-stop') {
-        setCommandText('🛑 Auto-stopped - Processing audio...');
-        console.log('🛑 Recording auto-stopped due to silence detection');
-      } else {
-        console.log('⏹️ Recording stopped manually');
-      }
-    } else {
-      console.log('⚠️ Cannot stop recording - not currently recording');
-    }
-  };
-
-  const sendAudioToBackend = async (audioBlob) => {
-    setIsLoading(true);
-    setIsConversationActive(true);
-    resetTimeout();
-
-    try {
-      // Determine appropriate file extension based on MIME type
-      let fileName = 'recording.webm'; // Default
-      if (audioBlob.type.includes('opus')) {
-        fileName = 'recording.opus';
-      } else if (audioBlob.type.includes('ogg')) {
-        fileName = 'recording.ogg';
-      } else if (audioBlob.type.includes('mp4')) {
-        fileName = 'recording.mp4';
-      } else if (audioBlob.type.includes('wav')) {
-        fileName = 'recording.wav';
-      }
-
-      const formData = new FormData();
-      formData.append('audio_file', audioBlob, fileName);
-      formData.append('session_id', sessionId);
-      formData.append('langChoice', langChoice);
-
-      // Enable auto-stop detection
-      formData.append('enable_auto_stop', 'true');
-      formData.append('silence_threshold', '500');
-      formData.append('min_speech_duration_ms', '500');
-      formData.append('silence_duration_ms', '1500');
-
-      console.log('📤 Sending audio to backend for transcription...');
-      console.log('Audio details:', {
-        size: audioBlob.size,
-        type: audioBlob.type,
-        fileName: fileName
-      });
-
-      // Check if this was an auto-stopped recording
-      const wasAutoStopped = commandText.includes('Auto-stopped');
-      if (wasAutoStopped) {
-        console.log('🛑 Processing auto-stopped recording');
-        setCommandText('🛑 Auto-stopped - Transcribing audio...');
-      }
-
-      const response = await axios.post(`${API_BASE_URL}/process-command-unified/`, formData, {
-        headers: {
-          'X-API-Key': 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM',
-          'Content-Type': 'multipart/form-data'
+    // Acquire real GPS coordinates on start — previously nothing sent lat/lng at
+    // all, so every location-dependent query (weather, etc.) silently fell back to
+    // a random Bangkok point on the backend. If the driver denies permission or the
+    // browser doesn't support it, coords stays null and that old fallback still
+    // applies — this can only make location accuracy better, never worse.
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setCoords({ lat: position.coords.latitude, lng: position.coords.longitude });
+          console.log('Got real location:', position.coords.latitude, position.coords.longitude);
         },
-        timeout: 30000, // 30 second timeout for Ubuntu systems
-        onUploadProgress: (progressEvent) => {
-          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-          console.log(`Upload progress: ${percentCompleted}%`);
-        }
-      });
-
-      const { transcribed_text, reply, command, openEndedValue, detected_language, auto_stop_detected, vad_info } = response.data;
-
-      console.log('Audio transcribed:', transcribed_text);
-      console.log('Detected language:', detected_language);
-
-      // Log VAD information
-      if (auto_stop_detected) {
-        console.log('🛑 Auto-stop detected by VAD system');
-      }
-      if (vad_info) {
-        console.log('🎙️ VAD Info:', vad_info);
-      }
-
-      // Add user message (transcribed text) to chat
-      const userMessage = {
-        sender: 'user',
-        message: transcribed_text,
-      };
-      setChatHistory(prev => [...prev, userMessage]);
-
-      // Set the transcribed text in the input field
-      setCommandText(transcribed_text);
-      setApiResponse(response.data);
-
-      // Add assistant response to chat
-      if (reply) {
-        const assistantMessage = {
-          sender: 'assistant',
-          message: {
-            command,
-            reply,
-            openEndedValue,
-          },
-        };
-        setChatHistory(prev => [...prev, assistantMessage]);
-
-        // Speak the response
-        await speakText(reply);
-      }
-
-    } catch (error) {
-      console.error('Error transcribing audio:', error);
-      const errorMessage = error.response?.data?.reply || error.response?.data?.error || error.message;
-      setError(`Audio transcription error: ${errorMessage}`);
-
-      // Add error message to chat history
-      const errorChatMessage = {
-        sender: 'assistant',
-        message: `Error: ${errorMessage}`,
-      };
-      setChatHistory(prev => [...prev, errorChatMessage]);
-    } finally {
-      setIsLoading(false);
-      setRecordingTime(0);
+        (err) => console.warn('Geolocation unavailable, using backend default:', err.message),
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
+      );
     }
+
+    setIsBooting(true);
+    setTimeout(() => {
+      setIsBooting(false);
+      setIsSystemOn(true);
+    }, 1100);
   };
 
-  const handleAudioInput = () => {
-    if (isRecording) {
-      stopRecording();
-    } else {
-      startRecording();
-    }
-  };
+  const clockLabel = clock.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   return (
-    <div className="container">
-      <h1>Virtual Car Assistant</h1>
-      <p className="car-description">
-        Interact with your virtual car using voice or text commands!
-        Try "turn on the AC", "play some music", or "navigate to downtown".
-      </p>
-      <img 
-        src="/car-image.jpg" 
-        alt="Car Dashboard" 
-        className="car-image" 
-        onError={(e) => e.target.style.display='none'} 
-      />
-
-      {/* Session and Conversation Controls */}
-      <div className="control-buttons">
-        <label>
-          Timeout (seconds): 
-          <input 
-            type="number" 
-            value={conversationTimeout} 
-            onChange={(e) => setConversationTimeout(Math.max(10, parseInt(e.target.value) || 60))}
-            min="10"
-            max="300"
-            style={{width: '60px', marginLeft: '5px'}}
-          />
-        </label>
-        
-        {/* ADD THIS BUTTON HERE */}
-        <button 
-          onClick={resetChat}
-          className="reset-button"
-          style={{
-            marginLeft: '10px',
-            backgroundColor: '#ff4444',
-            color: 'white',
-            border: 'none',
-            padding: '8px 16px',
-            borderRadius: '4px',
-            cursor: 'pointer'
-          }}
-          title="Reset conversation and start fresh"
+    <div className="page">
+      <div className="bezel">
+        <button
+          type="button"
+          onClick={toggleSystemPower}
+          className={`power-button ${isSystemOn ? 'on' : ''}`}
+          title={isSystemOn ? 'Power off the system' : 'Power on the system'}
         >
-          🔄 Reset Conversation
+          <PowerIcon />
         </button>
-        
-        <div style={{ marginBottom: "1rem", marginTop: "1rem" }}>
-          <span style={{ marginRight: "1rem" }}>Current language: {langChoice === "en" ? "English" : "Thai"}</span>
-          <button onClick={() => setLangChoice(langChoice === "en" ? "th" : "en")}>
-            Switch to {langChoice === "en" ? "Thai" : "English"}
-          </button>
+
+        <div className="container">
+          {!isSystemOn && (
+            <div className="lock-screen">
+              {isBooting ? (
+                <>
+                  <div className="boot-spinner" />
+                  <p>Starting system…</p>
+                </>
+              ) : (
+                <>
+                  <div className="lock-icon"><PowerIcon /></div>
+                  <p>Press the side button to power on</p>
+                </>
+              )}
+            </div>
+          )}
+          {isSystemOn && (
+          <>
+          <div className="status-bar">
+            <span className="status-item"><span className="status-dot" /> ONLINE</span>
+            <span className="status-clock">{clockLabel}</span>
+            <span className="status-item"><SignalIcon /> LTE</span>
+          </div>
+
+          <div className="dashboard-grid">
+            <aside className="sidebar">
+              <div className={`voice-orb ${liveStatus === 'listening' ? 'listening' : ''} ${liveStatus === 'speaking' ? 'thinking' : ''}`}>
+                <div className="voice-orb-ring" />
+                <div className="voice-orb-core"><CarIcon /></div>
+              </div>
+              <h1>Car Assistant</h1>
+
+              <div className="widgets">
+                <div className={`widget-card ${ac.power ? 'active' : ''}`}>
+                  <div className="widget-head">
+                    <span className="widget-label">Climate</span>
+                    <span className={`widget-status-dot ${ac.power ? 'on' : ''}`} />
+                  </div>
+                  {ac.power ? (
+                    <>
+                      <div className="widget-temp">{ac.temp}<span className="widget-unit">°C</span></div>
+                      <div className="fan-bars">
+                        {[1, 2, 3, 4, 5, 6, 7].map(i => (
+                          <span key={i} className={`fan-bar ${i <= ac.fan ? 'filled' : ''}`} />
+                        ))}
+                      </div>
+                      <div className="widget-sub"><FanIcon /> Fan {ac.fan}/7</div>
+                    </>
+                  ) : (
+                    <div className="widget-off">AC off</div>
+                  )}
+                </div>
+
+                <div className="widget-card">
+                  <div className="widget-head">
+                    <span className="widget-label">Weather</span>
+                  </div>
+                  {weather?.weather ? (
+                    <>
+                      <div className="widget-temp">{Math.round(weather.weather.temperature)}<span className="widget-unit">°C</span></div>
+                      <div className="widget-sub">
+                        {weatherIconFor(weather.weather.icon)}
+                        {weather.weather.description}
+                        {weather.location?.name ? ` · ${weather.location.name}` : ''}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="widget-off">{coords ? 'Loading…' : 'Waiting for location'}</div>
+                  )}
+                </div>
+
+                <div className="widget-card">
+                  <div className="widget-head">
+                    <span className="widget-label">Air Quality</span>
+                  </div>
+                  {airQuality?.air_quality?.main ? (
+                    <>
+                      <div className="widget-sub-main">{AQI_LABELS[airQuality.air_quality.main.aqi] || 'Unknown'}</div>
+                      <div className="widget-sub">
+                        <LeafIcon /> PM2.5: {Math.round(airQuality.air_quality.components?.pm2_5 ?? 0)} µg/m³
+                      </div>
+                    </>
+                  ) : (
+                    <div className="widget-off">{coords ? 'Loading…' : 'Waiting for location'}</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="sidebar-toolbar">
+                <button
+                  type="button"
+                  onClick={toggleWakeWord}
+                  className={`toolbar-button ${wakeWordPreferred ? 'wake-active' : ''}`}
+                  title={`Say "${WAKE_PHRASE}" to start a voice command — stays on across power cycles`}
+                  disabled={isLiveActive}
+                >
+                  {wakeWordPreferred ? `"${WAKE_PHRASE}" always on` : 'Wake word off'}
+                </button>
+              </div>
+            </aside>
+
+            <main className="main-panel">
+              <div className="voice-status-panel">
+                <SparkleIcon />
+                <p className="voice-status-text">
+                  {liveStatus === 'connecting' ? 'Connecting…'
+                    : liveStatus === 'listening' ? 'Listening…'
+                    : liveStatus === 'speaking' ? 'Speaking…'
+                    : `Say "${WAKE_PHRASE}" or tap Live Talk`}
+                </p>
+                <p className="voice-status-hint">
+                  Ask about the AC, the weather, the owner's manual, nearby dealerships, or anything else
+                </p>
+              </div>
+
+              <div className="suggestion-chips">
+                {['"What\'s the weather like?"', '"Turn on the AC"', '"Nearest dealership?"'].map(s => (
+                  <span key={s} className="suggestion-chip">{s}</span>
+                ))}
+              </div>
+
+              {error && <p className="error-message">{error}</p>}
+
+              <div className="talk-buttons">
+                <button
+                  type="button"
+                  onClick={toggleLiveTalk}
+                  className={`mic-button live-button ${isLiveActive ? 'recording' : ''}`}
+                  disabled={!isAudioSupported}
+                  title={!isAudioSupported ?
+                    "Microphone not available - check browser permissions" :
+                    "Real-time voice conversation via Gemini Live"}
+                >
+                  {!isAudioSupported ? <MicOffIcon /> : <MicIcon />}
+                  <span>
+                    {liveStatus === 'connecting' ? 'Connecting…'
+                      : liveStatus === 'listening' ? 'Live — listening'
+                      : liveStatus === 'speaking' ? 'Live — speaking'
+                      : 'Live Talk'}
+                  </span>
+                </button>
+              </div>
+            </main>
+          </div>
+          </>
+          )}
         </div>
       </div>
-
-      <h2>Car Command System (Gemini)</h2>
-      <form onSubmit={handleSubmit} className="input-form">
-        <div className="input-area">
-          <input
-            type="text"
-            value={commandText}
-            onChange={handleInputChange}
-            placeholder="Type or speak your command..."
-            disabled={isLoading || isRecording}
-          />
-          <button type="submit" disabled={isLoading || isRecording || !commandText.trim()}>
-            {isLoading ? 'Processing...' : 'Send Command'}
-          </button>
-          <button
-            type="button"
-            onClick={handleAudioInput}
-            className={`voice-button ${isRecording ? 'recording' : ''}`}
-            disabled={isLoading || !isAudioSupported}
-            title={!isAudioSupported ?
-              "Microphone not available - check browser permissions" :
-              (isRecording ? `Recording... ${recordingTime}s - Click to stop` : "Click to record voice command")}
-          >
-            {!isAudioSupported ?
-              'Mic N/A 🔇' :
-              (isRecording ? `Recording... ${recordingTime}s 🔴` : 'Record 🎙️')}
-          </button>
-        </div>
-      </form>
-
-      {error && <p className="error-message">{error}</p>}
-
-      {chatHistory.length > 0 && (
-        <div className="chat-window">
-          <h3>Conversation History ({chatHistory.length} messages)</h3>
-          <div className="chat-messages">
-            {chatHistory.map((msg, idx) => (
-              <div key={idx} className={`chat-message ${msg.sender}`}>
-                <span className="message-bubble">
-                  {typeof msg.message === 'string' ? (
-                    msg.message
-                  ) : (
-                    <>
-                      <strong>🧠 Command Code:</strong> {msg.message.command}<br />
-                      <strong>💬 Response:</strong> {msg.message.reply}<br />
-                      <strong>🔍 Open-ended Value:</strong> {msg.message.openEndedValue !== null && msg.message.openEndedValue !== undefined 
-                        ? msg.message.openEndedValue 
-                        : 'null'}<br />
-                    </>
-                  )}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {isLoading && (
-        <p className="loading-message" style={{ marginTop: '1rem', fontStyle: 'italic', color: '#555' }}>
-          ⏳ Waiting for Gemini response...
-        </p>
-      )}
-
-      <hr style={{margin: "40px 0"}} />
-
-      {/* Hugging Face Interaction Section */}
-      <h2>General Text Generation (Hugging Face)</h2>
-      <form onSubmit={handleHfSubmit} className="input-form">
-        <div className="input-area">
-          <input
-            type="text"
-            value={hfPrompt}
-            onChange={handleHfInputChange}
-            placeholder="Enter prompt for Hugging Face model..."
-            disabled={isHfLoading}
-          />
-          <button type="submit" disabled={isHfLoading || !hfPrompt.trim()}>
-            {isHfLoading ? 'Generating...' : 'Generate Text'}
-          </button>
-        </div>
-      </form>
-
-      {hfError && <p className="error-message">{hfError}</p>}
-      {isHfLoading && !hfError && <p className="loading-message">Waiting for Hugging Face response...</p>}
-      {hfResponse && (
-        <div className="response-area">
-          <h3>Hugging Face Model Response:</h3>
-          <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{hfResponse}</pre>
-        </div>
-      )}
     </div>
   );
 }
