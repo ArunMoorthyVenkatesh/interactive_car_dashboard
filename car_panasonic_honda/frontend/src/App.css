@@ -1,4 +1,5 @@
-/* src/App.css — Cockpit Dark (in-car dashboard UI), landscape screen layout */
+/* src/App.css — Cockpit (in-car dashboard UI), landscape screen layout.
+   Dark is the default; :root[data-theme="light"] overrides below switch palette. */
 
 :root {
   --color-bg: #05060a;
@@ -13,12 +14,33 @@
   --color-cyan: #3ddfe0;
   --color-danger: #ff5470;
   --color-danger-soft: rgba(255, 84, 112, 0.12);
+  --page-bg-gradient: radial-gradient(ellipse 70% 60% at 50% 0%, #131722 0%, #05060a 60%);
+  --page-bg: #000;
+  --bezel-gradient: linear-gradient(155deg, #23262f 0%, #0b0c11 60%);
   --radius-lg: 16px;
   --radius-md: 12px;
   --radius-sm: 8px;
   --font-display: 'Sora', -apple-system, sans-serif;
   --font-body: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+}
+
+:root[data-theme="light"] {
+  --color-bg: #eef0f5;
+  --color-panel: #f7f8fb;
+  --color-panel-alt: #eceef4;
+  --color-panel-raised: #ffffff;
+  --color-border: #d7dbe4;
+  --color-text: #1b1e27;
+  --color-text-muted: #6a7080;
+  --color-amber: #cc6a1e;
+  --color-amber-dim: #a85a26;
+  --color-cyan: #12868a;
+  --color-danger: #d1304a;
+  --color-danger-soft: rgba(209, 48, 74, 0.1);
+  --page-bg-gradient: radial-gradient(ellipse 70% 60% at 50% 0%, #ffffff 0%, #dfe3ec 60%);
+  --page-bg: #c9cedb;
+  --bezel-gradient: linear-gradient(155deg, #e4e7ee 0%, #b9bfcd 60%);
 }
 
 * {
@@ -28,8 +50,9 @@
 body {
   font-family: var(--font-body);
   margin: 0;
-  background: #000;
+  background: var(--page-bg);
   color: var(--color-text);
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 .page {
@@ -38,8 +61,7 @@ body {
   justify-content: center;
   align-items: center;
   padding: 32px 20px;
-  background:
-    radial-gradient(ellipse 70% 60% at 50% 0%, #131722 0%, #05060a 60%);
+  background: var(--page-bg-gradient);
 }
 
 /* Outer bezel — makes the panel read as a physical screen inset into a dashboard */
@@ -49,7 +71,7 @@ body {
   max-width: 1040px;
   padding: 14px;
   border-radius: 24px;
-  background: linear-gradient(155deg, #23262f 0%, #0b0c11 60%);
+  background: var(--bezel-gradient);
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.04) inset,
     0 30px 60px rgba(0, 0, 0, 0.55);
@@ -405,10 +427,21 @@ body {
   color: var(--color-amber);
 }
 
-.toolbar-button.wake-active {
-  background: rgba(255, 138, 61, 0.14);
-  border-color: var(--color-amber-dim);
-  color: var(--color-amber);
+.toolbar-select {
+  padding: 8px 10px;
+  background: var(--color-panel-raised);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.toolbar-select:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* --- Main panel: chat area + input, pinned to bottom --- */
@@ -464,8 +497,44 @@ body {
   border-radius: 999px;
   background: var(--color-panel-raised);
   color: var(--color-text-muted);
+  font-family: var(--font-body);
   font-size: 0.7rem;
   white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.suggestion-chip:hover:not(:disabled) {
+  border-color: var(--color-amber-dim);
+  color: var(--color-amber);
+}
+
+.suggestion-chip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Live captions — shown in place of the idle hint once a turn is underway, so the
+   driver can see what was heard and what's being said without it being a black box. */
+.live-transcript {
+  max-width: 46ch;
+  text-align: center;
+}
+
+.transcript-line {
+  margin: 4px 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.transcript-user {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.transcript-assistant {
+  color: var(--color-text);
+  font-weight: 500;
 }
 
 .widget-sub-main {
@@ -520,6 +589,21 @@ body {
 .mic-button:hover:not(:disabled) {
   border-color: var(--color-amber-dim);
   color: var(--color-amber);
+}
+
+/* The single, primary control of the whole app — deliberately oversized so it's
+   easy to hit without looking, since the driver should never be reading the
+   screen to find a small button. */
+.live-button-large {
+  padding: 22px;
+  font-size: 1.05rem;
+  border-radius: var(--radius-lg);
+  gap: 12px;
+}
+
+.live-button-large svg {
+  width: 26px;
+  height: 26px;
 }
 
 .mic-button.recording {

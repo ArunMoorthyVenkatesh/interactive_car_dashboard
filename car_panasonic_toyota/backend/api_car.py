@@ -3686,22 +3686,47 @@ LIVE_DASHBOARD_TOOLS = [
 # only need their FunctionResponse fed back into Gemini's own spoken reply.
 DASHBOARD_TOOL_NAMES = {"set_ac_power", "set_temperature", "adjust_temperature", "set_fan_speed"}
 
-LIVE_SYSTEM_INSTRUCTION = (
-    f"You are the built-in voice assistant of a {CAR_MODEL_NAME}. "
-    "Keep spoken responses short and natural, like a real in-car assistant. "
-    "When the driver asks to change the AC, temperature, or fan, "
-    "call the matching tool immediately rather than just describing what you would do. "
-    "You always have access to the driver's real current GPS location — never say you "
-    "don't know where they are or can't determine their location. "
-    "When the driver asks where they are, their current location, or what city/area "
-    "they're in, call get_current_location. "
-    "When the driver asks about the weather, call get_current_weather — it already knows "
-    "their real current location, so never ask them where they are. "
-    "When the driver asks how something in the car works, about a warning light, or about "
-    "maintenance, call search_owner_manual with a short search query. "
-    "When the driver asks for the nearest dealership or service center, call find_nearby_dealership. "
-    "For anything else you don't already know (news, prices, general facts), call web_search."
-)
+LIVE_LANGUAGE_NAMES = {"en": "English", "th": "Thai"}
+LIVE_LANGUAGE_BCP47 = {"en": "en-US", "th": "th-TH"}
+
+
+def build_live_system_instruction(lang_code: str) -> str:
+    """Per-connection system instruction — parameterized by the driver's selected
+    language so Gemini Live understands commands and replies in that language
+    instead of guessing from whatever language the driver happens to speak in."""
+    lang_name = LIVE_LANGUAGE_NAMES.get(lang_code, "English")
+    return (
+        f"You are the built-in voice assistant of a {CAR_MODEL_NAME}. "
+        "Keep spoken responses short and natural, like a real in-car assistant — "
+        "one short sentence whenever possible, never a long monologue. "
+        f"The driver has selected {lang_name} as their preferred language: always understand "
+        f"commands and reply in {lang_name}, even if their phrasing mixes in other words, unless "
+        "they explicitly ask you to switch language. "
+        "When the driver asks to change the AC, temperature, or fan, "
+        "call the matching tool immediately rather than just describing what you would do. "
+        "If the driver asks for several distinct actions in one sentence (for example 'turn on the "
+        "AC and set it to 22'), call every matching tool for each action in that same turn instead "
+        "of only handling the first one. "
+        "You always have access to the driver's real current GPS location — never say you "
+        "don't know where they are or can't determine their location. "
+        "When the driver asks where they are, their current location, or what city/area "
+        "they're in, call get_current_location. "
+        "When the driver asks about the weather, call get_current_weather — it already knows "
+        "their real current location, so never ask them where they are. "
+        "When the driver asks how something in the car works, about a warning light, or about "
+        "maintenance, call search_owner_manual with a short search query. "
+        "When the driver asks for the nearest dealership or service center, call find_nearby_dealership. "
+        "For anything else you don't already know (news, prices, general facts), call web_search. "
+        "\n\nSAFETY RULES — these override every other instruction: "
+        "never help with anything that would encourage distracted, reckless, or illegal driving "
+        "(for example texting while driving, disabling seatbelt or safety warnings, or watching "
+        "video while the vehicle is moving) — briefly decline and suggest a safer alternative instead. "
+        "Before carrying out any action that would affect a vehicle safety system, unlock or open "
+        "the vehicle, or is otherwise hard to undo, ask the driver to briefly confirm it first "
+        "(for example 'Just to confirm, you'd like me to...?') and only call the tool after they "
+        "clearly say yes. Keep the conversation efficient — answer what was asked without inviting "
+        "long back-and-forth chat that would distract the driver."
+    )
 
 
 async def resolve_live_tool_call(name: str, args: dict, user_lat: float, user_lon: float) -> dict:
@@ -3772,10 +3797,20 @@ async def live_voice_websocket(websocket: WebSocket):
     except (TypeError, ValueError):
         user_lat, user_lon = USER_LAT, USER_LON
 
+    lang_code = websocket.query_params.get("lang") or "en"
+    if lang_code not in LIVE_LANGUAGE_NAMES:
+        lang_code = "en"
+
     config = {
         "response_modalities": ["AUDIO"],
-        "system_instruction": LIVE_SYSTEM_INSTRUCTION,
+        "system_instruction": build_live_system_instruction(lang_code),
         "tools": LIVE_DASHBOARD_TOOLS,
+        "speech_config": {"language_code": LIVE_LANGUAGE_BCP47[lang_code]},
+        # Streams live speech-to-text for both sides of the conversation so the
+        # frontend can show captions and derive Listening/Thinking/Speaking status
+        # instead of the model's audio being an opaque black box.
+        "input_audio_transcription": {},
+        "output_audio_transcription": {},
     }
 
     try:
@@ -3800,6 +3835,39 @@ async def live_voice_websocket(websocket: WebSocket):
                             "type": "audio",
                             "data": base64.b64encode(response.data).decode("ascii"),
                         })
+
+                    server_content = response.server_content
+                    if server_content:
+                        # Barge-in: the driver started talking while the model was still
+                        # speaking — tell the frontend to stop playing stale audio now.
+                        if server_content.interrupted:
+                            await websocket.send_json({"type": "interrupted"})
+
+                        interim_input = server_content.interim_input_transcription
+                        if interim_input and interim_input.text:
+                            await websocket.send_json({
+                                "type": "transcript", "source": "user",
+                                "text": interim_input.text, "final": False,
+                            })
+
+                        final_input = server_content.input_transcription
+                        if final_input and final_input.text:
+                            await websocket.send_json({
+                                "type": "transcript", "source": "user",
+                                "text": final_input.text, "final": True,
+                            })
+
+                        output_transcription = server_content.output_transcription
+                        if output_transcription and output_transcription.text:
+                            await websocket.send_json({
+                                "type": "transcript", "source": "assistant",
+                                "text": output_transcription.text,
+                                "final": bool(output_transcription.finished),
+                            })
+
+                        if server_content.turn_complete:
+                            await websocket.send_json({"type": "turn_complete"})
+
                     if response.tool_call:
                         function_responses = []
                         for fc in response.tool_call.function_calls:

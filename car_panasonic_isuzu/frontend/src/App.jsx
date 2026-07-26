@@ -4,6 +4,7 @@ import './App.css';
 // --- Configuration ---
 // const API_BASE_URL = '/api'; // Your FastAPI backend URL
 const API_BASE_URL = 'http://localhost:8003';
+const API_KEY = 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM';
 
 // --- Icons (inline SVG, no external dependency) ---
 const MicIcon = () => (
@@ -71,6 +72,19 @@ const LeafIcon = () => (
   </svg>
 );
 
+const SunIcon2 = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="4.5" />
+    <path d="M12 2.5v2.5M12 19v2.5M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M2.5 12H5M19 12h2.5M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8" />
+  </svg>
+);
+
+const MoonIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z" />
+  </svg>
+);
+
 // OpenWeather's 1-5 Air Quality Index scale.
 const AQI_LABELS = { 1: 'Good', 2: 'Fair', 3: 'Moderate', 4: 'Poor', 5: 'Very Poor' };
 
@@ -126,11 +140,34 @@ const weatherIconFor = (code) => {
   return <CloudIcon />;
 };
 
+// Voice-only example questions. Tapping one sends it straight to the assistant and
+// speaks the reply back (Web Speech API) — no typing required, ever, since the
+// driver should not be reading/typing while driving.
+const EXAMPLE_QUESTIONS = [
+  "What's the weather like?",
+  'Turn on the AC',
+  'Set temperature to 22 degrees',
+  "What's the nearest dealership?",
+  "What's the air quality like?",
+  'How do I check the tire pressure?',
+  'Tell me a joke',
+  'Where am I right now?',
+];
+
+const SUPPORTED_LANGUAGES = [
+  { code: 'en', label: 'English' },
+  { code: 'th', label: 'ไทย' },
+];
+
+// Longest a Live Talk call is left open before it's auto-ended with a nudge — keeps
+// the driver from getting pulled into a long back-and-forth while the vehicle moves.
+const LIVE_MAX_DURATION_MS = 3 * 60 * 1000;
+
 function App() {
   const [error, setError] = useState('');
 
   // Whether this browser can access the microphone at all — gates the Live Talk
-  // button (the only voice input mode now; Push to talk was removed).
+  // button (the only voice input mode; there is no text input anywhere in this app).
   const [isAudioSupported, setIsAudioSupported] = useState(false);
 
   // --- Ignition: system must be "started" before the dashboard is usable ---
@@ -152,35 +189,66 @@ function App() {
     if (!coords) return;
 
     fetch(`${API_BASE_URL}/current-weather/?lat=${coords.lat}&lng=${coords.lng}`, {
-      headers: { 'X-API-Key': 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM' },
+      headers: { 'X-API-Key': API_KEY },
     })
       .then(res => res.ok ? res.json() : Promise.reject(new Error(`Weather request failed: ${res.status}`)))
       .then(setWeather)
       .catch(err => console.warn('Weather widget fetch failed:', err));
 
     fetch(`${API_BASE_URL}/air-quality/?lat=${coords.lat}&lng=${coords.lng}`, {
-      headers: { 'X-API-Key': 'nUutfYzyfwDyQ99r-7eYkQULAQLpk95zKkhlp-ISmpM' },
+      headers: { 'X-API-Key': API_KEY },
     })
       .then(res => res.ok ? res.json() : Promise.reject(new Error(`Air quality request failed: ${res.status}`)))
       .then(setAirQuality)
       .catch(err => console.warn('Air quality widget fetch failed:', err));
   }, [coords]);
 
+  // --- Theme (light/dark), persisted across visits ---
+  const [theme, setTheme] = useState(() => {
+    try { return localStorage.getItem('theme') || 'dark'; } catch (e) { return 'dark'; }
+  });
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('theme', theme); } catch (e) { /* noop */ }
+  }, [theme]);
+  const toggleTheme = () => setTheme(t => (t === 'dark' ? 'light' : 'dark'));
+
+  // --- Preferred language, persisted — drives both Gemini Live's spoken language
+  // and the text-based example-question pipeline, so the assistant doesn't
+  // misunderstand commands or reply in the wrong language.
+  const [language, setLanguage] = useState(() => {
+    try { return localStorage.getItem('language') || 'en'; } catch (e) { return 'en'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('language', language); } catch (e) { /* noop */ }
+  }, [language]);
+
   // --- Gemini Live (real-time voice mode) ---
   const [isLiveActive, setIsLiveActive] = useState(false);
-  const [liveStatus, setLiveStatus] = useState('idle'); // idle | connecting | listening | speaking
+  const [liveStatus, setLiveStatus] = useState('idle'); // idle | connecting | listening | thinking | speaking
   const liveWsRef = useRef(null);
   const liveStreamRef = useRef(null);
   const liveCaptureCtxRef = useRef(null);
   const liveCaptureNodeRef = useRef(null);
   const livePlaybackCtxRef = useRef(null);
   const livePlaybackCursorRef = useRef(0);
+  const liveActiveSourcesRef = useRef([]); // scheduled/playing buffer sources — stopped on barge-in
+  const liveDurationTimerRef = useRef(null);
+  const thinkingTimerRef = useRef(null);
+  const userTurnOpenRef = useRef(false);
+  const assistantTurnOpenRef = useRef(false);
+
+  // Live captions: what the driver said and what the assistant is replying, so the
+  // AI's "thinking" isn't a black box — this doubles as an accessibility aid.
+  const [liveTranscript, setLiveTranscript] = useState({ user: '', assistant: '' });
+
+  // --- One-click example questions (text pipeline + speech synthesis) ---
+  const [isAsking, setIsAsking] = useState(false);
+  const exampleSessionIdRef = useRef(`web-${Date.now()}`);
 
   // --- Dummy dashboard state: AC/climate, driven by real command codes ---
   const [ac, setAc] = useState({ power: true, temp: 22, fan: 3 });
   const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
-
-  const WAKE_PHRASE = 'hello isuzu';
 
   // Live clock for the dashboard status bar
   const [clock, setClock] = useState(() => new Date());
@@ -212,6 +280,25 @@ function App() {
     }
     else if (name === 'set_fan_speed') {
       const v = parseInt(args.level, 10);
+      if (!isNaN(v)) setAc(s => ({ ...s, fan: clamp(v, 1, 7) }));
+    }
+  };
+
+  // Same dashboard sync, but driven by the legacy 8-digit command codes returned by
+  // the text pipeline (used by the one-click example questions below), so the AC
+  // widget stays consistent regardless of which path answered the question.
+  const applyCommandCode = (command, openEndedValue) => {
+    if (command === '00060005') setAc(s => ({ ...s, power: true }));
+    else if (command === '00060006') setAc(s => ({ ...s, power: false }));
+    else if (command === '00060007') setAc(s => ({ ...s, temp: clamp(s.temp + 1, 16, 30) }));
+    else if (command === '00060008') setAc(s => ({ ...s, temp: clamp(s.temp - 1, 16, 30) }));
+    else if (command === '00060009' && openEndedValue) {
+      const v = parseInt(openEndedValue, 10);
+      if (!isNaN(v)) setAc(s => ({ ...s, temp: clamp(v, 16, 30) }));
+    } else if (command === '00060001') setAc(s => ({ ...s, fan: clamp(s.fan + 1, 1, 7) }));
+    else if (command === '00060002') setAc(s => ({ ...s, fan: clamp(s.fan - 1, 1, 7) }));
+    else if (command === '00060016' && openEndedValue) {
+      const v = parseInt(openEndedValue, 10);
       if (!isNaN(v)) setAc(s => ({ ...s, fan: clamp(v, 1, 7) }));
     }
   };
@@ -274,6 +361,10 @@ function App() {
     const src = ctx.createBufferSource();
     src.buffer = buffer;
     src.connect(ctx.destination);
+    liveActiveSourcesRef.current.push(src);
+    src.onended = () => {
+      liveActiveSourcesRef.current = liveActiveSourcesRef.current.filter(s => s !== src);
+    };
 
     const now = ctx.currentTime;
     const startAt = Math.max(now, livePlaybackCursorRef.current);
@@ -281,9 +372,35 @@ function App() {
     livePlaybackCursorRef.current = startAt + buffer.duration;
   };
 
+  // Barge-in support: when the backend reports the driver interrupted the model
+  // (see 'interrupted' handling below), cut off whatever is queued/playing right now
+  // instead of letting stale audio keep playing over the driver's new question.
+  const stopLivePlaybackQueue = () => {
+    liveActiveSourcesRef.current.forEach(s => { try { s.stop(); } catch (e) { /* already stopped */ } });
+    liveActiveSourcesRef.current = [];
+    if (livePlaybackCtxRef.current) {
+      livePlaybackCursorRef.current = livePlaybackCtxRef.current.currentTime;
+    }
+  };
+
+  const clearThinkingTimer = () => {
+    if (thinkingTimerRef.current) {
+      clearTimeout(thinkingTimerRef.current);
+      thinkingTimerRef.current = null;
+    }
+  };
+
   const stopLiveTalk = () => {
     setIsLiveActive(false);
     setLiveStatus('idle');
+    setLiveTranscript({ user: '', assistant: '' });
+    userTurnOpenRef.current = false;
+    assistantTurnOpenRef.current = false;
+    clearThinkingTimer();
+    if (liveDurationTimerRef.current) {
+      clearTimeout(liveDurationTimerRef.current);
+      liveDurationTimerRef.current = null;
+    }
     if (liveWsRef.current) {
       try { liveWsRef.current.send(JSON.stringify({ type: 'end' })); } catch (e) { /* noop */ }
       liveWsRef.current.close();
@@ -301,6 +418,7 @@ function App() {
       liveStreamRef.current.getTracks().forEach(t => t.stop());
       liveStreamRef.current = null;
     }
+    liveActiveSourcesRef.current = [];
     if (livePlaybackCtxRef.current) {
       livePlaybackCtxRef.current.close();
       livePlaybackCtxRef.current = null;
@@ -311,6 +429,7 @@ function App() {
     if (isLiveActive) return;
     setLiveStatus('connecting');
     setError('');
+    setLiveTranscript({ user: '', assistant: '' });
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -318,10 +437,11 @@ function App() {
 
       // Real GPS coords (if acquired on power-on) let the backend answer
       // weather/dealership/local-search questions for the driver's actual location
-      // instead of the random default fallback.
-      let wsUrl = API_BASE_URL.replace(/^http/, 'ws') + '/ws/live';
+      // instead of the random default fallback. lang picks Gemini Live's spoken
+      // language and reinforces command understanding in that language.
+      let wsUrl = API_BASE_URL.replace(/^http/, 'ws') + `/ws/live?lang=${language}`;
       if (coords) {
-        wsUrl += `?lat=${coords.lat}&lng=${coords.lng}`;
+        wsUrl += `&lat=${coords.lat}&lng=${coords.lng}`;
       }
       const ws = new WebSocket(wsUrl);
       liveWsRef.current = ws;
@@ -332,6 +452,12 @@ function App() {
       ws.onopen = () => {
         setLiveStatus('listening');
         setIsLiveActive(true);
+
+        // Driving-safety guardrail: don't let a single call run on indefinitely.
+        liveDurationTimerRef.current = setTimeout(() => {
+          setError('Ending the call to keep your focus on the road — tap Live Talk to continue.');
+          stopLiveTalk();
+        }, LIVE_MAX_DURATION_MS);
 
         const captureCtx = new (window.AudioContext || window.webkitAudioContext)();
         liveCaptureCtxRef.current = captureCtx;
@@ -346,6 +472,9 @@ function App() {
           const input = e.inputBuffer.getChannelData(0);
           const downsampled = downsampleBuffer(input, captureCtx.sampleRate, 16000);
           const pcm16 = floatTo16BitPCM(downsampled);
+          // Mic audio streams to the server continuously, even while the assistant is
+          // speaking — that's what makes barge-in possible: the server-side model
+          // detects the driver talking over it and reports 'interrupted' below.
           ws.send(JSON.stringify({ type: 'audio', data: base64FromInt16(pcm16) }));
         };
 
@@ -356,9 +485,48 @@ function App() {
 
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
+
         if (msg.type === 'audio') {
+          clearThinkingTimer();
           setLiveStatus('speaking');
           playLiveAudioChunk(msg.data);
+        } else if (msg.type === 'transcript' && msg.source === 'user') {
+          clearThinkingTimer();
+          setLiveStatus('listening');
+          if (!userTurnOpenRef.current) {
+            assistantTurnOpenRef.current = false;
+            setLiveTranscript({ user: msg.text, assistant: '' });
+          } else {
+            setLiveTranscript(t => ({ ...t, user: t.user + msg.text }));
+          }
+          userTurnOpenRef.current = !msg.final;
+          if (msg.final) {
+            // Brief pause before showing "Thinking" — cancelled immediately if audio
+            // or an assistant transcript chunk arrives first.
+            thinkingTimerRef.current = setTimeout(() => setLiveStatus('thinking'), 250);
+          }
+        } else if (msg.type === 'transcript' && msg.source === 'assistant') {
+          clearThinkingTimer();
+          setLiveStatus('speaking');
+          if (!assistantTurnOpenRef.current) {
+            userTurnOpenRef.current = false;
+            setLiveTranscript(t => ({ user: t.user, assistant: msg.text }));
+          } else {
+            setLiveTranscript(t => ({ ...t, assistant: t.assistant + msg.text }));
+          }
+          assistantTurnOpenRef.current = !msg.final;
+        } else if (msg.type === 'interrupted') {
+          // Barge-in: the driver started talking while the assistant was still
+          // speaking — stop the stale audio immediately instead of talking over them.
+          clearThinkingTimer();
+          stopLivePlaybackQueue();
+          assistantTurnOpenRef.current = false;
+          setLiveStatus('listening');
+        } else if (msg.type === 'turn_complete') {
+          clearThinkingTimer();
+          userTurnOpenRef.current = false;
+          assistantTurnOpenRef.current = false;
+          setLiveStatus('listening');
         } else if (msg.type === 'tool_call') {
           applyLiveToolCall(msg.name, msg.args || {});
         } else if (msg.type === 'error') {
@@ -384,100 +552,64 @@ function App() {
     else startLiveTalk();
   };
 
-  // --- Wake word: "Hello Toyota" starts a voice command ---
-  // On by default (even on a first-ever visit) and persists across reloads/power-cycles
-  // via localStorage, so it stays on "all the time" unless the driver explicitly turns
-  // it off — turning it off is itself remembered too. wakeWordEnabled reflects whether
-  // it's actually listening right now (only possible while powered on).
-  const [wakeWordPreferred, setWakeWordPreferred] = useState(() => {
-    try { return localStorage.getItem(`wakeWordPreferred:${WAKE_PHRASE}`) !== 'false'; }
-    catch (e) { return true; }
-  });
-  const [wakeWordEnabled, setWakeWordEnabled] = useState(false);
-  const wakeRecognitionRef = useRef(null);
+  // One-click example questions: text pipeline + browser speech synthesis, so a
+  // driver can get an answer without speaking or typing at all. Shares the same
+  // command-code -> dashboard sync as everything else, so the AC widget stays
+  // consistent no matter which path answered the question.
+  const askExampleQuestion = async (text) => {
+    if (isLiveActive || isAsking) return;
+    setIsAsking(true);
+    setError('');
+    setLiveStatus('thinking');
+    setLiveTranscript({ user: text, assistant: '' });
 
-  // Just for recognizing the wake phrase itself — follows the browser/OS locale
-  // rather than assuming English. The actual conversation that follows goes through
-  // Live Talk (Gemini Live), which is natively multilingual and needs no language hint.
-  const wakeWordLang = navigator.language || 'en-US';
-
-  const startWakeWordListening = () => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setError('Wake word detection is not supported in this browser.');
-      return;
-    }
-    if (wakeRecognitionRef.current) return; // already running
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = false;
-    recognition.lang = wakeWordLang;
-
-    recognition.onresult = (event) => {
-      const last = event.results[event.results.length - 1];
-      const heard = last[0].transcript.toLowerCase();
-      if (heard.includes(WAKE_PHRASE.toLowerCase())) {
-        recognition.stop();
-        startLiveTalk();
+    try {
+      const body = new FormData();
+      body.append('command_text', text);
+      body.append('langChoice', language);
+      body.append('session_id', exampleSessionIdRef.current);
+      if (coords) {
+        body.append('lat', coords.lat);
+        body.append('lng', coords.lng);
       }
-    };
 
-    recognition.onend = () => {
-      // Browsers auto-stop after a period of silence — keep listening while enabled
-      if (wakeRecognitionRef.current === recognition) {
-        try { recognition.start(); } catch (e) { /* already started */ }
+      const res = await fetch(`${API_BASE_URL}/process-command-unified/`, {
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY },
+        body,
+      });
+      const data = await res.json();
+      const reply = data.reply || "Sorry, I couldn't get a response.";
+
+      setLiveTranscript(t => ({ ...t, assistant: reply }));
+      applyCommandCode(data.command, data.openEndedValue);
+      setLiveStatus('speaking');
+
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+        const utter = new SpeechSynthesisUtterance(reply);
+        utter.lang = language === 'th' ? 'th-TH' : 'en-US';
+        utter.onend = () => setLiveStatus('idle');
+        utter.onerror = () => setLiveStatus('idle');
+        window.speechSynthesis.speak(utter);
+      } else {
+        setTimeout(() => setLiveStatus('idle'), 2500);
       }
-    };
-
-    recognition.onerror = (event) => {
-      console.warn('Wake word recognition error:', event.error);
-    };
-
-    wakeRecognitionRef.current = recognition;
-    setWakeWordEnabled(true);
-    recognition.start();
-  };
-
-  const stopWakeWordListening = () => {
-    if (wakeRecognitionRef.current) {
-      wakeRecognitionRef.current.onend = null; // don't auto-restart
-      wakeRecognitionRef.current.stop();
-      wakeRecognitionRef.current = null;
+    } catch (err) {
+      console.error('Example question failed:', err);
+      setError('Could not reach the assistant: ' + err.message);
+      setLiveStatus('idle');
+    } finally {
+      setIsAsking(false);
     }
-    setWakeWordEnabled(false);
   };
 
-  // User-facing toggle: flips the persistent preference and, if the system is
-  // currently on, starts/stops listening immediately to match.
-  const toggleWakeWord = () => {
-    const next = !wakeWordPreferred;
-    setWakeWordPreferred(next);
-    try { localStorage.setItem(`wakeWordPreferred:${WAKE_PHRASE}`, String(next)); } catch (e) { /* noop */ }
-
-    if (next && isSystemOn) startWakeWordListening();
-    else if (!next) stopWakeWordListening();
-  };
-
-  // Auto-resume wake word listening whenever the system powers on, if the driver
-  // previously left it enabled — that's what makes it "on all the time" without
-  // having to re-toggle it every ignition cycle.
-  useEffect(() => {
-    if (isSystemOn && wakeWordPreferred) {
-      startWakeWordListening();
-    } else if (!isSystemOn) {
-      stopWakeWordListening();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSystemOn]);
-
-  // --- Ignition button: only gates access to the system. It does NOT decide
-  // wake word on its own — that's driven by the persisted wakeWordPreferred
-  // effect above, which auto-resumes/stops listening as isSystemOn changes.
+  // --- Ignition button: only gates access to the system. ---
   const toggleSystemPower = () => {
     if (isSystemOn) {
       // Powering off: cleanly stop anything that might be running
       if (isLiveActive) stopLiveTalk();
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
       setIsSystemOn(false);
       setIsBooting(false);
       return;
@@ -506,7 +638,17 @@ function App() {
     }, 1100);
   };
 
-  const clockLabel = clock.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const clockLabel =
+    clock.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
+    ' · ' +
+    clock.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  const statusText =
+    liveStatus === 'connecting' ? 'Connecting…'
+    : liveStatus === 'listening' ? 'Listening…'
+    : liveStatus === 'thinking' ? 'Thinking…'
+    : liveStatus === 'speaking' ? 'Speaking…'
+    : 'Tap Live Talk or a suggestion below';
 
   return (
     <div className="page">
@@ -546,7 +688,7 @@ function App() {
 
           <div className="dashboard-grid">
             <aside className="sidebar">
-              <div className={`voice-orb ${liveStatus === 'listening' ? 'listening' : ''} ${liveStatus === 'speaking' ? 'thinking' : ''}`}>
+              <div className={`voice-orb ${liveStatus === 'listening' ? 'listening' : ''} ${(liveStatus === 'thinking' || liveStatus === 'speaking') ? 'thinking' : ''}`}>
                 <div className="voice-orb-ring" />
                 <div className="voice-orb-core"><CarIcon /></div>
               </div>
@@ -611,33 +753,56 @@ function App() {
               <div className="sidebar-toolbar">
                 <button
                   type="button"
-                  onClick={toggleWakeWord}
-                  className={`toolbar-button ${wakeWordPreferred ? 'wake-active' : ''}`}
-                  title={`Say "${WAKE_PHRASE}" to start a voice command — stays on across power cycles`}
-                  disabled={isLiveActive}
+                  onClick={toggleTheme}
+                  className="toolbar-button"
+                  title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
                 >
-                  {wakeWordPreferred ? `"${WAKE_PHRASE}" always on` : 'Wake word off'}
+                  {theme === 'dark' ? <MoonIcon /> : <SunIcon2 />}
+                  {theme === 'dark' ? 'Dark' : 'Light'}
                 </button>
+
+                <select
+                  className="toolbar-select"
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value)}
+                  disabled={isLiveActive}
+                  title="Preferred language"
+                >
+                  {SUPPORTED_LANGUAGES.map(l => (
+                    <option key={l.code} value={l.code}>{l.label}</option>
+                  ))}
+                </select>
               </div>
             </aside>
 
             <main className="main-panel">
               <div className="voice-status-panel">
                 <SparkleIcon />
-                <p className="voice-status-text">
-                  {liveStatus === 'connecting' ? 'Connecting…'
-                    : liveStatus === 'listening' ? 'Listening…'
-                    : liveStatus === 'speaking' ? 'Speaking…'
-                    : `Say "${WAKE_PHRASE}" or tap Live Talk`}
-                </p>
-                <p className="voice-status-hint">
-                  Ask about the AC, the weather, the owner's manual, nearby dealerships, or anything else
-                </p>
+                <p className="voice-status-text">{statusText}</p>
+
+                {(liveTranscript.user || liveTranscript.assistant) ? (
+                  <div className="live-transcript">
+                    {liveTranscript.user && <p className="transcript-line transcript-user">"{liveTranscript.user}"</p>}
+                    {liveTranscript.assistant && <p className="transcript-line transcript-assistant">{liveTranscript.assistant}</p>}
+                  </div>
+                ) : (
+                  <p className="voice-status-hint">
+                    Ask about the AC, the weather, the owner's manual, nearby dealerships, or anything else
+                  </p>
+                )}
               </div>
 
               <div className="suggestion-chips">
-                {['"What\'s the weather like?"', '"Turn on the AC"', '"Nearest dealership?"'].map(s => (
-                  <span key={s} className="suggestion-chip">{s}</span>
+                {EXAMPLE_QUESTIONS.map(s => (
+                  <button
+                    key={s}
+                    type="button"
+                    className="suggestion-chip"
+                    onClick={() => askExampleQuestion(s)}
+                    disabled={isLiveActive || isAsking}
+                  >
+                    {s}
+                  </button>
                 ))}
               </div>
 
@@ -647,8 +812,8 @@ function App() {
                 <button
                   type="button"
                   onClick={toggleLiveTalk}
-                  className={`mic-button live-button ${isLiveActive ? 'recording' : ''}`}
-                  disabled={!isAudioSupported}
+                  className={`mic-button live-button live-button-large ${isLiveActive ? 'recording' : ''}`}
+                  disabled={!isAudioSupported || isAsking}
                   title={!isAudioSupported ?
                     "Microphone not available - check browser permissions" :
                     "Real-time voice conversation via Gemini Live"}
@@ -657,6 +822,7 @@ function App() {
                   <span>
                     {liveStatus === 'connecting' ? 'Connecting…'
                       : liveStatus === 'listening' ? 'Live — listening'
+                      : liveStatus === 'thinking' ? 'Live — thinking'
                       : liveStatus === 'speaking' ? 'Live — speaking'
                       : 'Live Talk'}
                   </span>
