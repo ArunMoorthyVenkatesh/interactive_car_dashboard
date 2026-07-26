@@ -30,3 +30,6 @@ car_manual_isuzu.pdf
 !.vscode/extensions.json
 .idea
 *.log
+
+# Local Claude Code settings — machine-specific, not shared
+.claude/
